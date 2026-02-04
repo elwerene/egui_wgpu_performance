@@ -1,72 +1,93 @@
-#![warn(clippy::all, rust_2018_idioms)]
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-// When compiling natively:
-#[cfg(not(target_arch = "wasm32"))]
+use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup, WgpuSetupCreateNew};
+use egui::{Id, Slider, ViewportId};
+use std::{
+    sync::atomic::{AtomicUsize, Ordering::Relaxed},
+    time::Duration,
+};
+use wgpu::{PowerPreference, PresentMode};
+
+static FPS: AtomicUsize = AtomicUsize::new(0);
+static FPS_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
 fn main() -> eframe::Result {
-    env_logger::init(); // Log to stderr (if you run with `RUST_LOG=debug`).
+    start_update_fps_thread();
+
+    let mut wgpu_options = WgpuConfiguration::default();
+    wgpu_options.present_mode = PresentMode::AutoNoVsync; // We do not care about vsync as we have our own framerate limiter
+    wgpu_options.wgpu_setup = match wgpu_options.wgpu_setup {
+        WgpuSetup::CreateNew(create_new) => WgpuSetup::CreateNew(WgpuSetupCreateNew {
+            power_preference: PowerPreference::HighPerformance,
+            ..create_new
+        }),
+        _ => unreachable!(),
+    };
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([400.0, 300.0])
-            .with_min_inner_size([300.0, 220.0])
-            .with_icon(
-                // NOTE: Adding an icon is optional
-                eframe::icon_data::from_png_bytes(&include_bytes!("../assets/icon-256.png")[..])
-                    .expect("Failed to load icon"),
-            ),
+            .with_min_inner_size([300.0, 220.0]),
+        vsync: false,
+        wgpu_options,
         ..Default::default()
     };
     eframe::run_native(
-        "eframe template",
+        "egui_wgpu_performance",
         native_options,
-        Box::new(|cc| Ok(Box::new(eframe_template::TemplateApp::new(cc)))),
+        Box::new(|_cc| Ok(Box::new(TemplateApp::default()))),
     )
 }
 
-// When compiling to web using trunk:
-#[cfg(target_arch = "wasm32")]
-fn main() {
-    use eframe::wasm_bindgen::JsCast as _;
+#[derive(Default)]
+pub struct TemplateApp {
+    viewport_ids: Vec<egui::ViewportId>,
+}
 
-    // Redirect `log` message to `console.log` and friends:
-    eframe::WebLogger::init(log::LevelFilter::Debug).ok();
+impl eframe::App for TemplateApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading(format!(
+                "{} fps",
+                FPS.load(std::sync::atomic::Ordering::Relaxed)
+            ));
 
-    let web_options = eframe::WebOptions::default();
-
-    wasm_bindgen_futures::spawn_local(async {
-        let document = web_sys::window()
-            .expect("No window")
-            .document()
-            .expect("No document");
-
-        let canvas = document
-            .get_element_by_id("the_canvas_id")
-            .expect("Failed to find the_canvas_id")
-            .dyn_into::<web_sys::HtmlCanvasElement>()
-            .expect("the_canvas_id was not a HtmlCanvasElement");
-
-        let start_result = eframe::WebRunner::new()
-            .start(
-                canvas,
-                web_options,
-                Box::new(|cc| Ok(Box::new(eframe_template::TemplateApp::new(cc)))),
-            )
-            .await;
-
-        // Remove the loading text and spinner:
-        if let Some(loading_text) = document.get_element_by_id("loading_text") {
-            match start_result {
-                Ok(_) => {
-                    loading_text.remove();
-                }
-                Err(e) => {
-                    loading_text.set_inner_html(
-                        "<p> The app has crashed. See the developer console for details. </p>",
-                    );
-                    panic!("Failed to start eframe: {e:?}");
-                }
+            let mut number_of_windows = self.viewport_ids.len();
+            if ui
+                .add(Slider::new(&mut number_of_windows, 0..=10).text("Number of windows"))
+                .changed()
+            {
+                self.viewport_ids = (0..number_of_windows)
+                    .map(|i| ViewportId(Id::new(format!("w{i}"))))
+                    .collect();
             }
+        });
+
+        for viewport_id in &self.viewport_ids {
+            ctx.show_viewport_immediate(
+                *viewport_id,
+                egui::ViewportBuilder::default()
+                    .with_inner_size([400.0, 300.0])
+                    .with_min_inner_size([300.0, 220.0]),
+                |ctx, _viewport_class| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        ui.heading("Extra Window");
+                    });
+                },
+            );
+        }
+
+        ctx.request_repaint();
+        FPS_COUNTER.fetch_add(1, Relaxed);
+    }
+}
+
+fn start_update_fps_thread() {
+    std::thread::spawn(|| {
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+            let fps = FPS_COUNTER.swap(0, Relaxed);
+            FPS.store(fps, Relaxed);
         }
     });
 }
